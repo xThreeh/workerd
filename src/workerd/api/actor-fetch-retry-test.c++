@@ -60,6 +60,21 @@ class TestStreamSource final: public ReadableStreamSource {
   }
 };
 
+class RecordingRequestObserver final: public RequestObserver {
+ public:
+  explicit RecordingRequestObserver(kj::Vector<CountSubrequest>& countSubrequests)
+      : countSubrequests(countSubrequests) {}
+
+  kj::Own<WorkerInterface> wrapSubrequestClient(
+      kj::Own<WorkerInterface> client, CountSubrequest countSubrequest) override {
+    countSubrequests.add(countSubrequest);
+    return kj::mv(client);
+  }
+
+ private:
+  kj::Vector<CountSubrequest>& countSubrequests;
+};
+
 class RetryMetadataOutgoingFactory final: public Fetcher::OutgoingFactory {
  public:
   RetryMetadataOutgoingFactory(bool& ordinaryDispatchCalled,
@@ -78,6 +93,7 @@ class RetryMetadataOutgoingFactory final: public Fetcher::OutgoingFactory {
 
   Result newSingleUseClientWithActorRetryMetadata(kj::Maybe<kj::String>,
       kj::Maybe<IoChannelFactory::ActorRetryRequestMetadata> actorRetryRequestMetadata,
+      CountSubrequest,
       MakeUserSpanParent) override {
     capturedMetadata = kj::mv(actorRetryRequestMetadata);
     return {.client = kj::heap<MockFetchTarget>(), .spanParents = kj::none};
@@ -143,6 +159,7 @@ struct ReplayState {
   kj::Maybe<kj::Own<kj::WebSocket>> acceptedWebSocket;
   kj::Vector<IoChannelFactory::ActorRetryRequestMetadata> metadata;
   kj::Vector<kj::Array<kj::byte>> requestBodies;
+  kj::Vector<CountSubrequest> countSubrequests;
   uint requestCount = 0;
   uint webSocketRequestCount = 0;
   uint retryCount = 0;
@@ -244,8 +261,10 @@ class ReplayOutgoingFactory final: public Fetcher::OutgoingFactory {
 
   Result newSingleUseClientWithActorRetryMetadata(kj::Maybe<kj::String>,
       kj::Maybe<IoChannelFactory::ActorRetryRequestMetadata> actorRetryRequestMetadata,
+      CountSubrequest countSubrequest,
       MakeUserSpanParent) override {
     state.metadata.add(KJ_REQUIRE_NONNULL(actorRetryRequestMetadata));
+    state.countSubrequests.add(countSubrequest);
     return {.client = kj::heap<ReplayFetchTarget>(state), .spanParents = kj::none};
   }
 
@@ -519,6 +538,11 @@ KJ_TEST("actor fetch updates retry metadata and rewinds the body") {
   for (auto& metadata: state.metadata) {
     KJ_EXPECT(metadata.retryGateEnabled == ActorRetryGateEnabled::YES);
   }
+  KJ_ASSERT(state.countSubrequests.size() == 4);
+  KJ_EXPECT(state.countSubrequests[0] == CountSubrequest::YES);
+  KJ_EXPECT(state.countSubrequests[1] == CountSubrequest::NO);
+  KJ_EXPECT(state.countSubrequests[2] == CountSubrequest::NO);
+  KJ_EXPECT(state.countSubrequests[3] == CountSubrequest::NO);
   KJ_ASSERT(state.requestBodies.size() == 4);
   for (auto& body: state.requestBodies) {
     KJ_EXPECT(body == "request body"_kj.asBytes());
@@ -685,6 +709,7 @@ KJ_TEST("GlobalActorOutgoingFactory forwards metadata and recreates channels for
   uint checkedSubrequestCount = 0;
   kj::Vector<kj::String> locationHints;
   kj::Vector<kj::String> cohorts;
+  kj::Vector<CountSubrequest> countSubrequests;
   TestFixture fixture(TestFixture::SetupParams{
     .useRealTimers = false,
     .ioChannelFactory = kj::Function<kj::Rc<IoChannelFactory>(TimerChannel&)>(
@@ -693,6 +718,8 @@ KJ_TEST("GlobalActorOutgoingFactory forwards metadata and recreates channels for
         timer, capturedMetadata, channelCount, locationHints, cohorts);
   }),
     .checkedSubrequestCount = checkedSubrequestCount,
+    .requestObserverFactory = kj::Function<kj::Own<RequestObserver>()>(
+        [&]() { return kj::refcounted<RecordingRequestObserver>(countSubrequests); }),
   });
 
   fixture.runInIoContext([&](const TestFixture::Environment& env) {
@@ -710,7 +737,7 @@ KJ_TEST("GlobalActorOutgoingFactory forwards metadata and recreates channels for
           .isRetry = IsActorRetry::YES,
           .retryGateEnabled = ActorRetryGateEnabled::NO,
         },
-        [](TraceContext&) -> kj::Maybe<SpanParent> { return kj::none; });
+        CountSubrequest::YES, [](TraceContext&) -> kj::Maybe<SpanParent> { return kj::none; });
 
     KJ_IF_SOME(metadata, capturedMetadata) {
       KJ_EXPECT(metadata.nonce == 0x123456789abcdef0);
@@ -728,8 +755,8 @@ KJ_TEST("GlobalActorOutgoingFactory forwards metadata and recreates channels for
           .isRetry = IsActorRetry::YES,
           .retryGateEnabled = ActorRetryGateEnabled::NO,
         },
-        [](TraceContext&) -> kj::Maybe<SpanParent> { return kj::none; });
-    KJ_EXPECT(checkedSubrequestCount == 2);
+        CountSubrequest::NO, [](TraceContext&) -> kj::Maybe<SpanParent> { return kj::none; });
+    KJ_EXPECT(checkedSubrequestCount == 1);
     KJ_EXPECT(channelCount == 2);
     KJ_ASSERT(locationHints.size() == 2);
     KJ_EXPECT(locationHints[0] == "location");
@@ -737,6 +764,9 @@ KJ_TEST("GlobalActorOutgoingFactory forwards metadata and recreates channels for
     KJ_ASSERT(cohorts.size() == 2);
     KJ_EXPECT(cohorts[0] == "cohort");
     KJ_EXPECT(cohorts[1] == "cohort");
+    KJ_ASSERT(countSubrequests.size() == 2);
+    KJ_EXPECT(countSubrequests[0] == CountSubrequest::YES);
+    KJ_EXPECT(countSubrequests[1] == CountSubrequest::NO);
   });
 }
 

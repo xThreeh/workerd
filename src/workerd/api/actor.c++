@@ -115,17 +115,19 @@ void GlobalActorOutgoingFactory::onActorFetchRetry() {
 
 Fetcher::OutgoingFactory::Result GlobalActorOutgoingFactory::newSingleUseClient(
     kj::Maybe<kj::String> cfStr, MakeUserSpanParent makeUserSpanParent) {
-  return newSingleUseClientWithActorRetryMetadata(kj::mv(cfStr), kj::none, makeUserSpanParent);
+  return newSingleUseClientWithActorRetryMetadata(
+      kj::mv(cfStr), kj::none, CountSubrequest::YES, kj::mv(makeUserSpanParent));
 }
 
 Fetcher::OutgoingFactory::Result GlobalActorOutgoingFactory::
     newSingleUseClientWithActorRetryMetadata(kj::Maybe<kj::String> cfStr,
         kj::Maybe<IoChannelFactory::ActorRetryRequestMetadata> actorRetryRequestMetadata,
+        CountSubrequest countSubrequest,
         MakeUserSpanParent makeUserSpanParent) {
   auto& context = IoContext::current();
 
   kj::Maybe<TraceContextParent> spanParents;
-  auto startRequest = [&](TraceContext& tracing, IoChannelFactory& ioChannelFactory) {
+  auto makeClient = [&](TraceContext& tracing, IoChannelFactory& ioChannelFactory) {
     tracing.setTag("objectId"_kjc, id->toString());
     spanParents = tracing.getSpanParents();
     auto userSpanParent = tracing.getUserSpanParent();
@@ -139,7 +141,16 @@ Fetcher::OutgoingFactory::Result GlobalActorOutgoingFactory::
           .userSpanParent = kj::mv(userSpanParent),
           .actorRetryRequestMetadata = kj::mv(actorRetryRequestMetadata)});
   };
-  auto client = startActorSubrequest(context, startRequest);
+  auto options = IoContext::SubrequestOptions{
+    .inHouse = true,
+    .wrapMetrics = true,
+    .operationName = kj::ConstString("durable_object_subrequest"_kjc),
+  };
+  // Retries reuse the logical fetch's initial admission, bypassing its limit check and count.
+  auto client = countSubrequest
+      ? context.getSubrequest(makeClient, kj::mv(options))
+      : context.getSubrequestNoChecks(makeClient, kj::mv(options), CountSubrequest::NO);
+  client = context.getMetrics().wrapActorSubrequestClient(kj::mv(client));
   return {.client = kj::mv(client), .spanParents = kj::mv(spanParents)};
 }
 
