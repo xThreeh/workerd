@@ -1191,6 +1191,8 @@ class IoContext final: public kj::Refcounted, private kj::TaskSet::ErrorHandler 
   kj::TaskSet waitUntilTasks;
   EventOutcome waitUntilStatusValue = EventOutcome::OK;
 
+  void cancelOutstandingWork();
+
   void setTimeoutImpl(TimeoutId timeoutId,
       bool repeat,
       jsg::V8Ref<v8::Function> function,

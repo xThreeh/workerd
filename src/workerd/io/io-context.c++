@@ -317,6 +317,14 @@ IoContext::IncomingRequest::~IoContext_IncomingRequest() noexcept(false) {
     return;
   }
 
+  const bool hadUndrainedWaitUntilTasks = !waitedForWaitUntil && !context->waitUntilTasks.isEmpty();
+
+  if (!context->isShared()) {
+    // This request owns the last reference to its IoContext. Cancel context work while the request
+    // is still current so destructors attached to that work can finish reporting spans.
+    context->cancelOutstandingWork();
+  }
+
   // Hack: We need to report an accurate time stamps for the STW outcome event, but the timer may
   // not be available when the outcome event gets reported. Define the outcome event time as the
   // time when the incoming request shuts down.
@@ -329,7 +337,7 @@ IoContext::IncomingRequest::~IoContext_IncomingRequest() noexcept(false) {
     context->limitEnforcer->reportMetrics(*metrics);
     context->lastDeliveredLocation = deliveredLocation;
 
-    if (!waitedForWaitUntil && !context->waitUntilTasks.isEmpty()) {
+    if (hadUndrainedWaitUntilTasks) {
       KJ_LOG(WARNING, "failed to invoke drain() on IncomingRequest before destroying it",
           kj::getStackTrace());
     }
@@ -345,20 +353,14 @@ IoContext::IncomingRequest::~IoContext_IncomingRequest() noexcept(false) {
     // This context is not about to be destroyed when we drop it, but if it was aborted, we would
     // prefer for it to get cleaned up promptly.
 
-    KJ_IF_SOME(e, context->abortException) {
+    if (context->abortException != kj::none) {
       // The context was aborted. It's possible that the event ended with background work still
       // scheduled, because `drain()` ends early on abort. We should cancel that background work
       // now.
       //
       // We couldn't do this in abort() because it can be called from inside a task that could
       // be canceled, and a self-cancellation would lead to a crash.
-
-      if (!context->canceler.isEmpty()) {
-        context->canceler.cancel(e);
-      }
-      context->timeoutManager->cancelAll();
-      context->tasks.clear();
-      context->waitUntilTasks.clear();
+      context->cancelOutstandingWork();
     }
   }
 
@@ -708,16 +710,6 @@ class IoContext::PendingEvent: public kj::Refcounted {
 };
 
 IoContext::~IoContext() noexcept(false) {
-  if (!canceler.isEmpty()) {
-    KJ_IF_SOME(e, abortException) {
-      // Assume the abort exception is why we are canceling.
-      canceler.cancel(e);
-    } else {
-      canceler.cancel(JSG_KJ_EXCEPTION(
-          FAILED, Error, "The execution context responding to this call was canceled."));
-    }
-  }
-
   // Detach the PendingEvent if it still exists.
   KJ_IF_SOME(pe, pendingEvent) {
     pe.maybeContext = kj::none;
@@ -728,6 +720,25 @@ IoContext::~IoContext() noexcept(false) {
 
   // Kill the sentinel so that no weak references can refer to this IoContext anymore.
   selfRef->invalidate();
+
+  cancelOutstandingWork();
+}
+
+void IoContext::cancelOutstandingWork() {
+  if (!canceler.isEmpty()) {
+    KJ_IF_SOME(e, abortException) {
+      // Assume the abort exception is why we are canceling.
+      canceler.cancel(e);
+    } else {
+      canceler.cancel(JSG_KJ_EXCEPTION(
+          FAILED, Error, "The execution context responding to this call was canceled."));
+    }
+  }
+
+  // Promise cleanup in both task sets can access the timeout manager.
+  tasks.clear();
+  waitUntilTasks.clear();
+  timeoutManager->cancelAll();
 }
 
 IoContext::PendingEvent::~PendingEvent() noexcept(false) {
