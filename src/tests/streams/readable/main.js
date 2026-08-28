@@ -185,3 +185,9 @@ export {
   veryLargeAggregateTransfer,
   largeTransferThroughTee,
 } from 'data-volumes';
+
+export {
+  backpressureReadableHwmZero,
+  backpressureReadableHwmOne,
+  backpressureReadableHwmLarge,
+} from 'backpressure';
