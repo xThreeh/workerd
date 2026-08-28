@@ -16,6 +16,24 @@
 
 namespace workerd {
 
+constexpr kj::Exception::DetailTypeId SENTRY_DISPOSITION_DETAIL_ID = 0xd3b1bbd08ecf715ull;
+
+namespace _ {  // private
+
+inline kj::Maybe<kj::Exception> tagSentryExceptionForLogging(const kj::Exception& exception) {
+  KJ_IF_SOME(dispositionBytes, exception.getDetail(SENTRY_DISPOSITION_DETAIL_ID)) {
+    auto disposition = kj::str(dispositionBytes.asChars());
+    if (disposition.size() > 0 && !exception.getDescription().contains(disposition)) {
+      auto result = exception.clone();
+      result.setDescription(kj::str(disposition, " ", result.getDescription()));
+      return kj::mv(result);
+    }
+  }
+  return kj::none;
+}
+
+}  // namespace _
+
 // For internal errors, we generate an ID to include when rendering user-facing "internal error"
 // exceptions and writing internal exception logs, to make it easier to search for logs
 // corresponding to "internal error" exceptions reported by users.
@@ -34,16 +52,26 @@ InternalErrorId makeInternalErrorId();
 // from the macro so that we do not accidentally make a more granular fingerprint. It also will only
 // take a `context` argument that is known at compile time (via constexpr assignment).
 #define LOG_EXCEPTION(context, exception)                                                          \
-  [&](const kj::Exception& e) {                                                                    \
+  [&](const kj::Exception& untagged) {                                                             \
     constexpr auto sentryErrorContext = context;                                                   \
+    auto tagged = ::workerd::_::tagSentryExceptionForLogging(untagged);                            \
+    auto& e = [&]() -> const kj::Exception& {                                                      \
+      KJ_IF_SOME(e, tagged) return e;                                                              \
+      return untagged;                                                                             \
+    }();                                                                                           \
     KJ_LOG(ERROR, e, sentryErrorContext);                                                          \
   }(exception)
 
 #define LOG_EXCEPTION_WITH_ID(context, exception, id)                                              \
-  [&](const kj::Exception& e) {                                                                    \
+  [&](const kj::Exception& untagged, const ::workerd::InternalErrorId& wdErrId) {                  \
     constexpr auto sentryErrorContext = context;                                                   \
-    KJ_LOG(ERROR, e, sentryErrorContext, id);                                                      \
-  }(exception)
+    auto tagged = ::workerd::_::tagSentryExceptionForLogging(untagged);                            \
+    auto& e = [&]() -> const kj::Exception& {                                                      \
+      KJ_IF_SOME(e, tagged) return e;                                                              \
+      return untagged;                                                                             \
+    }();                                                                                           \
+    KJ_LOG(ERROR, e, sentryErrorContext, wdErrId);                                                 \
+  }(exception, id)
 
 #define ACTOR_STORAGE_OP_PREFIX "; actorStorageOp = "
 
