@@ -1,0 +1,29 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+config_setting(
+    name = "enabled",
+    define_values = {"rust_tsan": "true"},
+)
+
+_TSAN_ONLY = select({
+    ":enabled": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+rust_binary(
+    name = "race",
+    srcs = ["race.rs"],
+    edition = "2024",
+    target_compatible_with = _TSAN_ONLY,
+)
+
+sh_test(
+    name = "tsan-integration-test",
+    srcs = ["verify.sh"],
+    data = [
+        ":race",
+        "//build/rust:tsan_rust_std",
+    ],
+    target_compatible_with = _TSAN_ONLY,
+)

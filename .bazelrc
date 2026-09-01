@@ -249,6 +249,14 @@ build:tsan --config=sanitizer-common
 build:tsan --copt="-fsanitize=thread" --linkopt="-fsanitize=thread"
 # A statically-linked unwinder in each shared library cannot propagate exceptions across DSOs.
 build:tsan --linkopt="-l:libunwind.so.8"
+# Rust's sanitizer support requires nightly, and instrumented crates must use a matching standard
+# library. Prefer the custom toolchain over rules_rust's prebuilt nightly toolchain.
+build:tsan --@rules_rust//rust/toolchain/channel:channel=nightly
+build:tsan --extra_toolchains=//build/rust:tsan_toolchain
+build:tsan --platforms=//build/rust:tsan_platform
+build:tsan --@rules_rust//:extra_rustc_flag=-Zsanitizer=thread
+build:tsan --@rules_rust//:extra_rustc_flag=-Zexternal-clangrt
+build:tsan --define=rust_tsan=true
 build:tsan --action_env=TSAN_OPTIONS=halt_on_error=true
 build:tsan --test_env=TSAN_OPTIONS=halt_on_error=true
 # Clang-tidy loads this shared object into an unsanitized process, which cannot resolve TSan hooks.
